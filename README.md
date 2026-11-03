@@ -1,6 +1,6 @@
 # AI Email Triage
 
-![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Claude](https://img.shields.io/badge/Claude-Haiku%205.5-d97757) ![Tests](https://img.shields.io/badge/tests-41%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Claude](https://img.shields.io/badge/Claude-Haiku%205.5-d97757) ![Tests](https://img.shields.io/badge/tests-47%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 An AI assistant for a small business's shared inbox. It reads every email, **sorts it** (Urgent, Sales Lead, Support, Billing, Spam, Other), **pulls out who sent it and what they want**, **scores how urgent it is**, and **drafts a polite reply**. It then gives you a formatted **Excel report** and a **dashboard** with the most urgent emails at the top.
 
@@ -146,7 +146,7 @@ Right now it reads emails from files. It's built so a live mailbox can be plugge
 python -m pytest
 ```
 
-There are 41 tests, and they use a fake Claude client, so they never call the API or need a key. They cover:
+There are 47 tests. They use a fake Claude client, so they never call the API or need a key. Six of them open the dashboard in a real headless browser (Edge or Chrome; skipped if neither is installed) and check which emails are actually visible after each filter. They cover:
 - the exact API request (structured output schema, model, effort), and that the hand labels never reach the prompt
 - an email can't break out of its `<email>` tags
 - refusals, cut-off answers, rate limits and network errors only affect that one email; a bad key or model stops the run

@@ -53,6 +53,8 @@ CSS = """
   --code: #1b1b1a;
 }
 * { box-sizing: border-box; }
+/* Filtering hides rows with the `hidden` attribute; without this, `.row { display: grid }` would win and keep them visible. */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
@@ -209,6 +211,7 @@ JS = """
       var current = rows.filter(function (r) { return r.getAttribute('aria-selected') === 'true'; })[0];
       if (!current || current.hidden) { select(vis[0] || null, false); }
       app.classList.remove('show-detail');
+      try { history.replaceState(null, '', f === 'all' ? location.pathname : '#view=' + encodeURIComponent(f)); } catch (e) {}
     });
   });
 
@@ -228,6 +231,13 @@ JS = """
   });
 
   select(rows[0] || null, false);
+
+  // Open a view from the address bar, e.g. dashboard.html#view=Urgent (also survives a reload).
+  var m = /^#view=(.+)$/.exec(location.hash);
+  if (m) {
+    var wanted = decodeURIComponent(m[1]);
+    document.querySelectorAll('.nav').forEach(function (n) { if (n.dataset.filter === wanted) { n.click(); } });
+  }
 })();
 """
 
