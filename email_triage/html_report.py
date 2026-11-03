@@ -1,172 +1,329 @@
-"""A single self-contained HTML dashboard (no internet needed, opens in any browser)."""
+"""The triage dashboard: one self-contained HTML file, laid out like an inbox tool.
+
+Left: views and categories with counts. Middle: one dense row per email, most
+urgent first. Right: the selected email's details, draft reply and original text.
+Everything taken from an email is HTML-escaped here in Python; the small script
+at the bottom only shows/hides elements. No external files, fonts or requests.
+"""
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 from html import escape
 from pathlib import Path
 
 from .models import CATEGORIES, RunInfo, TriageResult, sort_key
 
-URGENCY = {  # level -> (label, status role or None)
-    5: ("Drop everything", "critical"),
-    4: ("Reply today", "serious"),
-    3: ("Within a day", "warning"),
-    2: ("This week", None),
-    1: ("Can wait", None),
-}
+URGENCY_LABELS = {5: "Drop everything", 4: "Reply today", 3: "Within a day", 2: "This week", 1: "Can wait"}
 
 CSS = """
 :root {
   color-scheme: light;
-  --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f3f2ee;
-  --ink: #0b0b0b; --ink-2: #52514e; --muted: #6f6d68;
-  --hairline: rgba(11,11,11,0.10); --grid: #e1e0d9; --axis: #c3c2b7;
-  --series: #2a78d6;
-  --critical: #d03b3b; --serious: #ec835a; --warning: #fab219;
-  --review-bg: #fff6dc; --review-ink: #7a4b00;
-  --chip: #eceae4; --focus: #2a78d6;
+  --bg: #ffffff; --bg-side: #f7f7f5; --bg-hover: #f3f3f0; --bg-selected: #e9f0ee;
+  --border: #e3e3df; --border-strong: #d2d2cc;
+  --text: #1c1c1a; --text-2: #55554f; --text-3: #75756f;
+  --accent: #2d6a5f; --accent-text: #ffffff;
+  --pill: #efefeb; --pill-text: #45453f;
+  --review: #f6eedb; --review-text: #6f5310;
+  --u5: #c2413b; --u4: #d07438; --u3: #d6c48f; --u-low: #d2d2cc;
+  --code: #fafaf8;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
-    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #222220;
-    --ink: #f0efec; --ink-2: #c3c2b7; --muted: #a3a198;
-    --hairline: rgba(255,255,255,0.10); --grid: #2c2c2a; --axis: #383835;
-    --series: #3987e5;
-    --review-bg: #3a2e12; --review-ink: #f5d48a;
-    --chip: #2c2c2a; --focus: #3987e5;
+    --bg: #171716; --bg-side: #1c1c1b; --bg-hover: #222220; --bg-selected: #1f2f2b;
+    --border: #2c2c2a; --border-strong: #3a3a37;
+    --text: #ebeae6; --text-2: #aeada7; --text-3: #8b8a84;
+    --accent: #6fb0a2; --accent-text: #0f1f1b;
+    --pill: #262624; --pill-text: #c9c8c2;
+    --review: #352d1b; --review-text: #e2c27c;
+    --u5: #e0605a; --u4: #e08a55; --u3: #7d6d42; --u-low: #3a3a37;
+    --code: #1b1b1a;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #222220;
-  --ink: #f0efec; --ink-2: #c3c2b7; --muted: #a3a198;
-  --hairline: rgba(255,255,255,0.10); --grid: #2c2c2a; --axis: #383835;
-  --series: #3987e5;
-  --review-bg: #3a2e12; --review-ink: #f5d48a;
-  --chip: #2c2c2a; --focus: #3987e5;
+  --bg: #171716; --bg-side: #1c1c1b; --bg-hover: #222220; --bg-selected: #1f2f2b;
+  --border: #2c2c2a; --border-strong: #3a3a37;
+  --text: #ebeae6; --text-2: #aeada7; --text-3: #8b8a84;
+  --accent: #6fb0a2; --accent-text: #0f1f1b;
+  --pill: #262624; --pill-text: #c9c8c2;
+  --review: #352d1b; --review-text: #e2c27c;
+  --u5: #e0605a; --u4: #e08a55; --u3: #7d6d42; --u-low: #3a3a37;
+  --code: #1b1b1a;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--page); color: var(--ink);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-.wrap { max-width: 1080px; margin: 0 auto; padding: 28px 20px 48px; }
-header h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.01em; }
-header p { margin: 0; color: var(--ink-2); }
-.banner { margin: 16px 0 0; padding: 10px 14px; border-radius: 8px; background: var(--surface-2);
-  border: 1px solid var(--hairline); color: var(--ink-2); font-size: 14px; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 22px 0; }
-.tile { background: var(--surface); border: 1px solid var(--hairline); border-radius: 10px; padding: 14px 16px; }
-.tile .label { font-size: 13px; color: var(--ink-2); display: flex; gap: 6px; align-items: center; }
-.tile .value { font-size: 30px; font-weight: 650; margin-top: 2px; }
-.panel { background: var(--surface); border: 1px solid var(--hairline); border-radius: 10px; padding: 18px 20px; margin-bottom: 22px; }
-.panel h2 { font-size: 16px; margin: 0 0 12px; }
-.bars { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; align-items: center; position: relative; }
-.bar-label { font-size: 14px; color: var(--ink-2); padding: 3px 0; }
-.bar-track { padding: 4px 44px 4px 0; cursor: default; }
-.bar-area { position: relative; height: 18px; border-left: 1px solid var(--axis); }
-.bar { height: 14px; margin-top: 2px; background: var(--series); border-radius: 0 4px 4px 0; }
-.bar-value { position: absolute; top: 0; font-size: 13px; color: var(--ink); font-variant-numeric: tabular-nums; }
-.tooltip { position: absolute; pointer-events: none; background: var(--ink); color: var(--surface);
-  font-size: 13px; padding: 6px 9px; border-radius: 6px; white-space: nowrap; transform: translate(-50%, -110%); }
-.filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
-.filters button { font: inherit; font-size: 14px; border: 1px solid var(--hairline); background: var(--surface);
-  color: var(--ink); padding: 6px 12px; border-radius: 999px; cursor: pointer; }
-.filters button[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
-.filters button:focus-visible, summary:focus-visible, .copy:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 10px; padding: 16px 18px; margin-bottom: 12px; }
-.card-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
-.card h3 { font-size: 16px; margin: 0 0 2px; overflow-wrap: anywhere; }
-.meta { font-size: 13px; color: var(--muted); margin-bottom: 8px; overflow-wrap: anywhere; }
-.chip { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--chip); color: var(--ink); }
-.chip.review { background: var(--review-bg); color: var(--review-ink); }
-.urg { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--ink); }
-.urg .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--axis); }
-.urg.critical .dot { background: var(--critical); } .urg.serious .dot { background: var(--serious); }
-.urg.warning .dot { background: var(--warning); }
-.urg .icon { font-size: 12px; }
-.summary { margin: 0 0 4px; }
-.why { margin: 0; font-size: 13px; color: var(--ink-2); }
-details { margin-top: 10px; border-top: 1px solid var(--hairline); padding-top: 8px; }
-summary { cursor: pointer; font-size: 14px; font-weight: 600; color: var(--ink-2); }
-.reply, .original { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-2); border-radius: 8px;
-  padding: 12px 14px; margin: 8px 0 0; font-size: 14px; }
-.original { font-family: ui-monospace, Consolas, monospace; font-size: 13px; color: var(--ink-2); }
-.copy { font: inherit; font-size: 13px; margin-top: 8px; border: 1px solid var(--hairline); background: var(--surface);
-  color: var(--ink); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
-.error { color: var(--review-ink); font-size: 13px; margin: 4px 0 0; }
-footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
-table.sr { position: absolute; left: -9999px; }
-@media (max-width: 520px) { .tile .value { font-size: 24px; } header h1 { font-size: 22px; } }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+button { font: inherit; color: inherit; }
+.num { font-variant-numeric: tabular-nums; }
+
+.app { display: grid; grid-template-rows: 44px minmax(0, 1fr); grid-template-columns: minmax(0, 1fr); height: 100vh; }
+.topbar { display: flex; align-items: center; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--border); min-width: 0; }
+.topbar .name { font-weight: 600; font-size: 14px; white-space: nowrap; }
+.topbar .sep { color: var(--text-3); }
+.topbar .muted { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar .demo { margin-left: auto; font-size: 12px; color: var(--text-2); border: 1px solid var(--border-strong);
+  border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+
+.panes { display: grid; grid-template-columns: 200px minmax(0, 1fr) 440px; min-height: 0; }
+.side { background: var(--bg-side); border-right: 1px solid var(--border); overflow-y: auto; padding: 10px 8px;
+  display: flex; flex-direction: column; }
+.side h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-3);
+  margin: 12px 8px 4px; }
+.side h2:first-child { margin-top: 2px; }
+.nav { display: flex; width: 100%; align-items: center; gap: 8px; border: 0; background: none; cursor: pointer;
+  padding: 5px 8px; border-radius: 4px; text-align: left; color: var(--text-2); }
+.nav:hover { background: var(--bg-hover); color: var(--text); }
+.nav[aria-current="true"] { background: var(--bg-selected); color: var(--text); font-weight: 600; }
+.nav .count { margin-left: auto; color: var(--text-3); font-weight: 400; }
+.nav .mark { width: 3px; height: 12px; border-radius: 1px; background: transparent; flex: none; }
+.nav[aria-current="true"] .mark { background: var(--accent); }
+.run { margin-top: auto; padding: 12px 8px 4px; font-size: 12px; color: var(--text-3); border-top: 1px solid var(--border); }
+.run div { display: flex; justify-content: space-between; gap: 8px; }
+.run span:last-child { color: var(--text-2); text-align: right; }
+
+.list { overflow-y: auto; min-width: 0; border-right: 1px solid var(--border); }
+.list-head { position: sticky; top: 0; z-index: 1; background: var(--bg); display: flex; align-items: baseline; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.list-head h1 { font-size: 14px; margin: 0; font-weight: 600; }
+.list-head .hint { color: var(--text-3); font-size: 12px; margin-left: auto; }
+.row { display: grid; grid-template-columns: 3px 14px 140px minmax(0, 1fr) auto 46px; align-items: center; gap: 10px;
+  width: 100%; height: 38px; padding: 0 14px 0 0; border: 0; border-bottom: 1px solid var(--border); background: var(--bg);
+  text-align: left; cursor: pointer; }
+.row:hover { background: var(--bg-hover); }
+.row[aria-selected="true"] { background: var(--bg-selected); }
+.row:focus-visible, .nav:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.bar { width: 3px; height: 100%; background: transparent; }
+.u5 { background: var(--u5); } .u4 { background: var(--u4); } .u3 { background: var(--u3); }
+.unum { color: var(--text-3); font-size: 12px; text-align: center; }
+.who { min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
+.who b, .who small, .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.who b { font-weight: 600; }
+.who small { color: var(--text-3); font-size: 11.5px; }
+.line { min-width: 0; color: var(--text-2); }
+.line .subj { color: var(--text); font-weight: 500; }
+.tags { display: flex; gap: 4px; }
+.tag { font-size: 11.5px; padding: 0 6px; line-height: 18px; border-radius: 4px; background: var(--pill); color: var(--pill-text);
+  white-space: nowrap; }
+.tag.review { background: var(--review); color: var(--review-text); }
+.time { color: var(--text-3); font-size: 12px; text-align: right; }
+.row.spam .who b, .row.spam .line, .row.spam .line .subj { color: var(--text-3); font-weight: 400; }
+.empty { padding: 28px 14px; color: var(--text-3); }
+
+.detail-pane { overflow-y: auto; min-width: 0; }
+.detail { padding: 16px 20px 28px; }
+.detail .back { display: none; }
+.detail h2 { font-size: 16px; line-height: 1.35; margin: 0 0 8px; font-weight: 600; overflow-wrap: anywhere; }
+.detail .tags { flex-wrap: wrap; margin-bottom: 14px; }
+.meta { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 4px 12px; margin: 0 0 16px; font-size: 13px; }
+.meta dt { color: var(--text-3); }
+.meta dd { margin: 0; overflow-wrap: anywhere; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--u-low); }
+.dot.u5 { background: var(--u5); } .dot.u4 { background: var(--u4); } .dot.u3 { background: var(--u3); }
+.section { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 14px; }
+.section h3 { font-size: 12px; font-weight: 600; color: var(--text-2); margin: 0 0 6px; }
+.section p { margin: 0; font-size: 14px; }
+.section .note { font-size: 12px; color: var(--text-3); margin: -2px 0 6px; }
+.warn { color: var(--review-text); background: var(--review); border-radius: 4px; padding: 6px 8px; margin: 0 0 12px; font-size: 13px; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font: 13.5px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--code); border: 1px solid var(--border); border-radius: 4px; padding: 10px 12px; }
+pre.original { font: 12.5px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--text-2); }
+.actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.btn { border: 1px solid var(--border-strong); background: var(--bg); border-radius: 4px; padding: 3px 10px; cursor: pointer; }
+.btn:hover { background: var(--bg-hover); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.actions .status { color: var(--text-3); font-size: 12px; }
+.placeholder { padding: 28px 20px; color: var(--text-3); }
+
+@media (max-width: 1100px) {
+  .panes { grid-template-columns: 180px minmax(0, 1fr) 380px; }
+  .row { grid-template-columns: 3px 14px 120px minmax(0, 1fr) 46px; }
+  .row .tags { display: none; }
+}
+@media (max-width: 820px) {
+  .app { height: auto; min-height: 100vh; }
+  .panes { grid-template-columns: minmax(0, 1fr); }
+  .side { flex-direction: row; flex-wrap: nowrap; overflow-x: auto; padding: 6px 8px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .side h2, .run { display: none; }
+  .nav { width: auto; white-space: nowrap; }
+  .list { border-right: 0; }
+  .row { grid-template-columns: 3px 14px minmax(0, 1fr) 46px; height: auto; padding: 6px 12px 6px 0; }
+  .row .bar { grid-column: 1; grid-row: 1 / 3; } .row .unum { grid-column: 2; grid-row: 1 / 3; }
+  .row .who { grid-column: 3; grid-row: 1; } .row .time { grid-column: 4; grid-row: 1; }
+  .row .line { grid-column: 3 / 5; grid-row: 2; }
+  .detail-pane { display: none; }
+  .app.show-detail .list, .app.show-detail .side { display: none; }
+  .app.show-detail .detail-pane { display: block; }
+  .detail .back { display: inline-block; margin-bottom: 10px; }
+  .topbar .muted, .topbar .sep { display: none; }
+  .topbar .muted.summary-line { display: inline; }
+  .topbar .name { overflow: hidden; text-overflow: ellipsis; }
+}
 """
 
 JS = """
 (function () {
-  var buttons = document.querySelectorAll('.filters button');
-  var cards = document.querySelectorAll('.card');
-  buttons.forEach(function (b) {
-    b.addEventListener('click', function () {
-      buttons.forEach(function (x) { x.setAttribute('aria-pressed', String(x === b)); });
-      var f = b.dataset.filter;
-      cards.forEach(function (c) {
-        var show = f === 'all' || (f === 'review' ? c.dataset.review === '1' : c.dataset.category === f);
-        c.hidden = !show;
+  var app = document.querySelector('.app');
+  var rows = Array.prototype.slice.call(document.querySelectorAll('.row'));
+  var details = {};
+  document.querySelectorAll('.detail').forEach(function (d) { details[d.dataset.for] = d; });
+  var placeholder = document.querySelector('.placeholder');
+  var empty = document.querySelector('.empty');
+  var title = document.querySelector('.list-head h1');
+  var shown = document.querySelector('.list-head .shown');
+
+  function visible() { return rows.filter(function (r) { return !r.hidden; }); }
+
+  function select(row, focus) {
+    rows.forEach(function (r) { r.setAttribute('aria-selected', String(r === row)); r.tabIndex = r === row ? 0 : -1; });
+    Object.keys(details).forEach(function (k) { details[k].hidden = !row || k !== row.dataset.id; });
+    placeholder.hidden = !!row;
+    if (row && focus) { row.focus(); }
+  }
+
+  rows.forEach(function (r) {
+    r.addEventListener('click', function () { select(r, false); app.classList.add('show-detail'); });
+  });
+
+  document.querySelector('.list').addEventListener('keydown', function (ev) {
+    var keys = { ArrowDown: 1, j: 1, ArrowUp: -1, k: -1 };
+    if (!(ev.key in keys)) return;
+    var vis = visible(), i = vis.indexOf(document.activeElement);
+    var next = vis[Math.min(vis.length - 1, Math.max(0, (i < 0 ? 0 : i + keys[ev.key])))];
+    if (next) { ev.preventDefault(); select(next, true); }
+  });
+
+  document.querySelectorAll('.nav').forEach(function (n) {
+    n.addEventListener('click', function () {
+      document.querySelectorAll('.nav').forEach(function (x) { x.setAttribute('aria-current', String(x === n)); });
+      var f = n.dataset.filter;
+      rows.forEach(function (r) {
+        r.hidden = !(f === 'all' || (f === 'review' ? r.dataset.review === '1' : r.dataset.category === f));
       });
+      var vis = visible();
+      title.textContent = n.dataset.title;
+      shown.textContent = vis.length;
+      empty.hidden = vis.length > 0;
+      var current = rows.filter(function (r) { return r.getAttribute('aria-selected') === 'true'; })[0];
+      if (!current || current.hidden) { select(vis[0] || null, false); }
+      app.classList.remove('show-detail');
     });
   });
+
+  document.querySelectorAll('.back').forEach(function (b) {
+    b.addEventListener('click', function () { app.classList.remove('show-detail'); });
+  });
+
   document.querySelectorAll('.copy').forEach(function (btn) {
     btn.addEventListener('click', function () {
-      var text = btn.previousElementSibling.textContent;
-      var done = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy reply'; }, 1500); };
-      if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, function () { btn.textContent = 'Select the text to copy'; });
+      var text = btn.closest('.section').querySelector('pre').textContent;
+      var status = btn.parentNode.querySelector('.status');
+      function say(msg) { status.textContent = msg; setTimeout(function () { status.textContent = ''; }, 1800); }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { say('Copied'); }, function () { say('Select the text and copy it'); });
+      } else { say('Select the text and copy it'); }
     });
   });
-  var tip = document.querySelector('.tooltip'), bars = document.querySelector('.bars');
-  document.querySelectorAll('.bar-track').forEach(function (t) {
-    t.addEventListener('mousemove', function (ev) {
-      var box = bars.getBoundingClientRect();
-      tip.textContent = t.dataset.tip; tip.hidden = false;
-      tip.style.left = (ev.clientX - box.left) + 'px'; tip.style.top = (ev.clientY - box.top) + 'px';
-    });
-    t.addEventListener('mouseleave', function () { tip.hidden = true; });
-  });
+
+  select(rows[0] || null, false);
 })();
 """
 
 
-def _urgency_badge(level: int) -> str:
-    label, role = URGENCY[level]
-    icon = {"critical": "&#9650;", "serious": "&#9650;", "warning": "&#9679;"}.get(role, "")
-    cls = f"urg {role}" if role else "urg"
-    return (f'<span class="{cls}"><span class="dot" aria-hidden="true"></span>'
-            f'Urgency {level} &middot; {label}</span>')
+def _short_time(iso: str, newest_day: str) -> str:
+    """'10:55' for emails on the newest day in the inbox, 'Nov 2' for older ones."""
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return escape(iso[:10])
+    if iso[:10] == newest_day:
+        return dt.strftime("%H:%M")
+    return f"{dt.strftime('%b')} {dt.day}"
 
 
-def _card(r: TriageResult) -> str:
+def _long_time(iso: str) -> str:
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return escape(iso)
+    return f"{dt.strftime('%a')}, {dt.strftime('%b')} {dt.day}, {dt.year}, {dt.strftime('%H:%M')}"
+
+
+def _tags(r: TriageResult, in_row: bool) -> str:
+    t = r.triage
+    tags = []
+    if t.needs_human:
+        tags.append('<span class="tag review">Review</span>')
+    tags.append(f'<span class="tag">{escape(t.category)}</span>')
+    if not in_row and t.confidence != "high":
+        tags.append(f'<span class="tag">{escape(t.confidence.capitalize())} confidence</span>')
+    return f'<span class="tags">{"".join(tags)}</span>'
+
+
+def _row(r: TriageResult, newest_day: str) -> str:
     t, e = r.triage, r.email
     who = t.sender_name or e.sender_name or e.sender_email
-    sender_bits = [escape(who)] + ([escape(t.company)] if t.company else []) + [escape(e.sender_email)]
-    received = escape(e.date.replace("T", " ")[:16])
-    chips = [f'<span class="chip">{escape(t.category)}</span>', _urgency_badge(t.urgency)]
-    if t.needs_human:
-        chips.append('<span class="chip review">Needs a person</span>')
-    if t.confidence != "high":
-        chips.append(f'<span class="chip">{escape(t.confidence.capitalize())} confidence</span>')
-    if t.draft_reply.strip():
-        reply = (f'<details open><summary>Draft reply</summary><div class="reply">{escape(t.draft_reply)}</div>'
-                 f'<button class="copy" type="button">Copy reply</button></details>')
-    else:
-        reply = '<p class="why">No reply drafted' + (" (spam)." if t.category == "Spam" else ".") + "</p>"
-    error = f'<p class="error">&#9888; {escape(r.error)}</p>' if r.error else ""
-    original = (f'<details><summary>Original email</summary><div class="original">From: {escape(e.sender)}\n'
-                f'Subject: {escape(e.subject)}\n\n{escape(e.body)}</div></details>')
+    snippet = t.summary if not r.error else f"Not analysed: {r.error}"
+    bar = f"u{t.urgency}" if t.urgency >= 3 else ""
+    label = f"{who}, {e.subject}, urgency {t.urgency}, {t.category}" + (", needs review" if t.needs_human else "")
     return (
-        f'<article class="card" data-category="{escape(t.category)}" data-review="{1 if t.needs_human else 0}">'
-        f'<div class="card-top">{"".join(chips)}</div>'
-        f'<h3>{escape(e.subject) or "(no subject)"}</h3>'
-        f'<div class="meta">{" &middot; ".join(sender_bits)} &middot; {received}</div>'
-        f'<p class="summary">{escape(t.summary)}</p>'
-        f'<p class="why">Why: {escape(t.urgency_reason)}</p>{error}{reply}{original}</article>'
+        f'<button type="button" class="row{" spam" if t.category == "Spam" else ""}" role="option" '
+        f'aria-selected="false" tabindex="-1" data-id="{escape(e.id)}" data-category="{escape(t.category)}" '
+        f'data-review="{1 if t.needs_human else 0}" aria-label="{escape(label)}">'
+        f'<span class="bar {bar}" title="Urgency {t.urgency}: {URGENCY_LABELS[t.urgency]}"></span>'
+        f'<span class="unum num">{t.urgency}</span>'
+        f'<span class="who"><b>{escape(who)}</b><small>{escape(t.company) or "&nbsp;"}</small></span>'
+        f'<span class="line"><span class="subj">{escape(e.subject) or "(no subject)"}</span> &ndash; {escape(snippet)}</span>'
+        f'{_tags(r, in_row=True)}'
+        f'<span class="time num">{_short_time(e.date, newest_day)}</span>'
+        f"</button>"
     )
+
+
+def _detail(r: TriageResult) -> str:
+    t, e = r.triage, r.email
+    who = t.sender_name or e.sender_name
+    sender = f"{escape(who)} &lt;{escape(e.sender_email)}&gt;" if who else escape(e.sender_email or e.sender)
+    dot = f'<span class="dot u{t.urgency}"></span>' if t.urgency >= 3 else '<span class="dot"></span>'
+    warn = f'<p class="warn">Not analysed automatically: {escape(r.error)}. Read the original below.</p>' if r.error else ""
+    if t.draft_reply.strip():
+        reply = (
+            '<div class="section"><h3>Draft reply</h3><p class="note">Written by AI. Read and edit before sending.</p>'
+            f'<pre class="reply">{escape(t.draft_reply)}</pre>'
+            '<div class="actions"><button type="button" class="btn primary copy">Copy reply</button>'
+            '<span class="status" aria-live="polite"></span></div></div>'
+        )
+    else:
+        why = "Spam: no reply drafted." if t.category == "Spam" else "No reply drafted."
+        reply = f'<div class="section"><h3>Draft reply</h3><p class="note">{why}</p></div>'
+    return (
+        f'<section class="detail" data-for="{escape(e.id)}" hidden aria-label="Email details">'
+        '<button type="button" class="btn back">Back to list</button>'
+        f'<h2>{escape(e.subject) or "(no subject)"}</h2>{_tags(r, in_row=False)}{warn}'
+        '<dl class="meta">'
+        f'<dt>From</dt><dd>{sender}</dd>'
+        f'<dt>Company</dt><dd>{escape(t.company) or "&ndash;"}</dd>'
+        f'<dt>To</dt><dd>{escape(e.to) or "&ndash;"}</dd>'
+        f'<dt>Received</dt><dd class="num">{_long_time(e.date)}</dd>'
+        f'<dt>Urgency</dt><dd>{dot}<span class="num">{t.urgency}</span> &middot; {URGENCY_LABELS[t.urgency]}'
+        f' &ndash; {escape(t.urgency_reason)}</dd>'
+        f'<dt>Confidence</dt><dd>{escape(t.confidence.capitalize())}</dd>'
+        "</dl>"
+        f'<div class="section"><h3>Summary</h3><p>{escape(t.summary)}</p></div>'
+        f"{reply}"
+        f'<div class="section"><h3>Original email</h3><pre class="original">{escape(e.body)}</pre></div>'
+        "</section>"
+    )
+
+
+def _header_date(info: RunInfo) -> str:
+    try:
+        dt = datetime.strptime(info.generated_at, "%Y-%m-%d %H:%M")
+        return f"{dt.strftime('%a')}, {dt.strftime('%b')} {dt.day}, {dt.year}"
+    except ValueError:
+        return escape(info.generated_at)
 
 
 def render_html(results: list[TriageResult], info: RunInfo) -> str:
@@ -174,89 +331,69 @@ def render_html(results: list[TriageResult], info: RunInfo) -> str:
     counts = Counter(r.triage.category for r in results)
     total = len(results)
     review = sum(r.triage.needs_human for r in results)
-    today = sum(r.triage.urgency >= 4 for r in results)
-    top = max(counts.values()) if counts else 1
+    newest_day = max((r.email.date[:10] for r in results if r.email.date), default="")
 
-    tiles = [
-        ("Emails", total, ""),
-        ("Urgent", counts.get("Urgent", 0), '<span class="urg critical"><span class="dot"></span></span>'),
-        ("Reply today (4-5)", today, ""),
-        ("Need a person", review, ""),
-        ("Sales leads", counts.get("Sales Lead", 0), ""),
-        ("Spam caught", counts.get("Spam", 0), ""),
-    ]
-    tiles_html = "".join(
-        f'<div class="tile"><div class="label">{icon}{escape(label)}</div><div class="value">{value}</div></div>'
-        for label, value, icon in tiles
-    )
+    nav = [
+        '<h2>Views</h2>',
+        _nav("all", "All emails", total, current=True),
+        _nav("review", "Needs review", review),
+        '<h2>Categories</h2>',
+    ] + [_nav(c, c, counts.get(c, 0)) for c in CATEGORIES]
 
-    bars_html = []
-    for cat in CATEGORIES:
-        n = counts.get(cat, 0)
-        pct = n / total if total else 0
-        width = 100 * n / top if top else 0
-        bars_html.append(
-            f'<div class="bar-label">{escape(cat)}</div>'
-            f'<div class="bar-track" data-tip="{escape(cat)}: {n} email{"s" if n != 1 else ""} ({pct:.0%})">'
-            f'<div class="bar-area"><div class="bar" style="width:{width:.1f}%;{"min-width:3px" if n else ""}"></div>'
-            f'<span class="bar-value" style="left:calc({width:.1f}% + 6px)">{n}</span></div></div>'
-        )
-    table_rows = "".join(f"<tr><td>{escape(c)}</td><td>{counts.get(c, 0)}</td></tr>" for c in CATEGORIES)
-
-    filters = [("all", f"All ({total})")] + [
-        (c, f"{c} ({counts.get(c, 0)})") for c in CATEGORIES if counts.get(c, 0)
-    ] + [("review", f"Needs a person ({review})")]
-    filters_html = "".join(
-        f'<button type="button" data-filter="{escape(key)}" aria-pressed="{str(key == "all").lower()}">{escape(label)}</button>'
-        for key, label in filters
-    )
-
-    banner = ""
-    if info.mode == "demo":
-        when = f" from {escape(info.results_from)}" if info.results_from else ""
-        banner = (f'<div class="banner"><b>Demo mode:</b> showing saved results{when}. '
-                  "No API key needed and no emails were sent anywhere.</div>")
-
+    run_rows = [("Model", escape(info.model))]
     labelled = [r for r in results if r.matches_expected is not None]
-    footer_bits = [f"Model: {escape(info.model)}", f"Generated {escape(info.generated_at)}"]
     if labelled:
-        footer_bits.append(f"Agreement with hand labels: {sum(bool(r.matches_expected) for r in labelled)} of {len(labelled)}")
+        run_rows.append(("Hand labels", f"{sum(bool(r.matches_expected) for r in labelled)} of {len(labelled)} match"))
     if info.estimated_cost_usd is not None:
-        footer_bits.append(f"Estimated API cost: ${info.estimated_cost_usd:.4f}")
-    footer_bits.append(f"Tokens: {info.input_tokens:,} in / {info.output_tokens:,} out")
+        run_rows.append(("API cost", f"${info.estimated_cost_usd:.4f}"))
+    run_rows.append(("Results from", escape(info.results_from or info.generated_at)))
+    run_html = "".join(f'<div><span>{k}</span><span class="num">{v}</span></div>' for k, v in run_rows)
+
+    summary_line = (f'<span class="num">{total}</span> emails &middot; <span class="num">{counts.get("Urgent", 0)}</span> urgent'
+                    f' &middot; <span class="num">{review}</span> need review')
+    demo = ('<span class="demo" title="Saved results from an earlier run. No API calls were made.">Demo data</span>'
+            if info.mode == "demo" else "")
 
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{escape(info.business_name)} - Inbox Triage</title>
+<title>{escape(info.business_name)} - Inbox triage</title>
 <style>{CSS}</style>
 </head>
 <body>
-<div class="wrap">
-<header>
-  <h1>{escape(info.business_name)} - Inbox Triage</h1>
-  <p>{total} emails sorted by AI: most urgent first, each with a summary and a draft reply to review.</p>
-  {banner}
-</header>
-<section class="tiles" aria-label="Totals">{tiles_html}</section>
-<section class="panel" aria-labelledby="by-cat">
-  <h2 id="by-cat">Emails by category</h2>
-  <div class="bars">{"".join(bars_html)}<div class="tooltip" hidden></div></div>
-  <table class="sr"><caption>Emails by category</caption><tr><th>Category</th><th>Emails</th></tr>{table_rows}</table>
-</section>
-<section aria-labelledby="inbox">
-  <h2 id="inbox" style="font-size:18px;margin:0 0 10px">Inbox, most urgent first</h2>
-  <div class="filters" role="group" aria-label="Filter emails">{filters_html}</div>
-  {"".join(_card(r) for r in ordered)}
-</section>
-<footer>{" &middot; ".join(footer_bits)}<br>Draft replies are suggestions written by AI. Read and edit before sending.</footer>
+<div class="app">
+  <header class="topbar">
+    <span class="name">{escape(info.business_name)}</span><span class="sep">/</span>
+    <span class="muted">Inbox triage &middot; {_header_date(info)}</span><span class="sep">&middot;</span>
+    <span class="muted summary-line">{summary_line}</span>
+    {demo}
+  </header>
+  <div class="panes">
+    <nav class="side" aria-label="Filter emails">{"".join(nav)}<div class="run">{run_html}</div></nav>
+    <main class="list" aria-label="Emails">
+      <div class="list-head"><h1>All emails</h1><span class="shown num">{total}</span>
+        <span class="hint">Most urgent first &middot; &uarr;&darr; to move</span></div>
+      <div role="listbox" aria-label="Emails, most urgent first">{"".join(_row(r, newest_day) for r in ordered)}</div>
+      <p class="empty" hidden>No emails in this view.</p>
+    </main>
+    <aside class="detail-pane" aria-label="Selected email">
+      <p class="placeholder">Select an email to see the details and draft reply.</p>
+      {"".join(_detail(r) for r in ordered)}
+    </aside>
+  </div>
 </div>
 <script>{JS}</script>
 </body>
 </html>
 """
+
+
+def _nav(key: str, label: str, count: int, current: bool = False) -> str:
+    return (f'<button type="button" class="nav" data-filter="{escape(key)}" data-title="{escape(label)}" '
+            f'aria-current="{str(current).lower()}"><span class="mark"></span>{escape(label)}'
+            f'<span class="count num">{count}</span></button>')
 
 
 def write_html(results: list[TriageResult], path: str | Path, info: RunInfo) -> Path:

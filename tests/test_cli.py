@@ -66,7 +66,7 @@ def test_limit_and_settings_from_env(monkeypatch, tmp_path, capsys):
     assert len(client.calls) == 3
     assert client.calls[0]["model"] == "claude-sonnet-5-5"
     assert "Acme Plumbing" in client.calls[0]["system"]
-    assert "Acme Plumbing - Inbox Triage" in (tmp_path / "dashboard.html").read_text(encoding="utf-8")
+    assert "Acme Plumbing - Inbox triage" in (tmp_path / "dashboard.html").read_text(encoding="utf-8")
 
 
 def test_rejected_key_stops_cleanly(monkeypatch, tmp_path, capsys):
@@ -96,7 +96,7 @@ def test_demo_mode_needs_no_key_and_makes_no_calls(monkeypatch, tmp_path, capsys
     assert cli.main(["--demo", "--out", str(out)]) == 0
     printed = capsys.readouterr().out
     assert "Demo mode: using saved results" in printed
-    assert "Demo mode:</b> showing saved results" in (out / "dashboard.html").read_text(encoding="utf-8")
+    assert ">Demo data</span>" in (out / "dashboard.html").read_text(encoding="utf-8")
     assert (out / "triage_report.xlsx").exists()
     assert not (out / "results.json").exists()  # demo doesn't overwrite saved results
 

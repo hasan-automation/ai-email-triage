@@ -60,17 +60,36 @@ def test_excel_report(tmp_path):
 def test_html_dashboard_content(tmp_path):
     path = write_html(sample_results(), tmp_path / "dash.html", INFO)
     html = path.read_text(encoding="utf-8")
-    assert "<title>Brightside Web Studio - Inbox Triage</title>" in html
-    subjects = re.findall(r"<h3>(.*?)</h3>", html)
-    assert subjects == ["Site down!", "??", "Double charge", "Quote please", "Cheap backlinks"]
-    assert 'data-filter="Urgent"' in html and 'data-filter="review"' in html
-    assert "Needs a person (3)" in html
-    assert "Agreement with hand labels: 3 of 4" in html
-    assert "Urgency 5 &middot; Drop everything" in html
-    assert "No reply drafted (spam)." in html
-    assert "&#9888; network error" in html
-    assert "Demo mode" not in html
+    assert "<title>Brightside Web Studio - Inbox triage</title>" in html
+    # Rows in the list and detail panels, both most urgent first
+    assert re.findall(r'class="row[^"]*"[^>]*data-id="([^"]+)"', html) == ["down", "broken", "bill", "lead", "spam"]
+    assert re.findall(r'class="detail" data-for="([^"]+)"', html) == ["down", "broken", "bill", "lead", "spam"]
+    # Header summary line and sidebar counts
+    assert '<span class="num">5</span> emails &middot; <span class="num">1</span> urgent' in html
+    assert '<span class="num">3</span> need review' in html
+    assert re.search(r'data-filter="review"[^>]*>.*?Needs review<span class="count num">3</span>', html)
+    assert re.search(r'data-filter="Urgent"[^>]*>.*?Urgent<span class="count num">1</span>', html)
+    # Urgency: thin bar + number in the row, words in the detail panel
+    assert '<span class="bar u5" title="Urgency 5: Drop everything"></span><span class="unum num">5</span>' in html
+    assert '<span class="num">5</span> &middot; Drop everything' in html
+    assert 'class="row spam"' in html
+    assert "Spam: no reply drafted." in html
+    assert "Not analysed automatically: network error." in html
+    assert html.count('class="btn primary copy"') == 3  # every non-spam, analysed email has a draft
+    assert "3 of 4 match" in html and "$0.0046" in html
+    assert "Demo data" not in html
 
+
+def test_design_rules():
+    """The look-and-feel constraints for this dashboard, so they don't drift."""
+    html = render_html(sample_results(), INFO)
+    css = html.split("<style>")[1].split("</style>")[0]
+    assert "gradient" not in css and "box-shadow" not in css and "backdrop-filter" not in css
+    radii = [int(px) for px in re.findall(r"border-radius:\s*(\d+)px", css)]
+    assert radii and max(r for r in radii if r != 50) <= 6  # 50% is only the urgency dot
+    assert "font-variant-numeric: tabular-nums" in css
+    assert "system-ui" in css
+    assert not re.search(r"[\U0001F300-\U0001FAFF☀-➿]", html), "no emoji or pictographs"
 
 def test_html_escapes_everything_from_the_email():
     evil = '<script>alert("x")</script><img src=x onerror=alert(1)>'
@@ -92,7 +111,7 @@ def test_demo_banner():
     info = RunInfo(mode="demo", model="claude-haiku-5-5", business_name="B", generated_at="now",
                    results_from="2026-11-03 15:00")
     html = render_html(sample_results(), info)
-    assert "Demo mode:</b> showing saved results from 2026-11-03 15:00" in html
+    assert ">Demo data</span>" in html and "2026-11-03 15:00" in html
 
 
 def test_round_trip_to_saved_json():
